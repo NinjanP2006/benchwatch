@@ -9,8 +9,10 @@ namespace perfkit {
 void sort_ints(std::span<std::int64_t> values);
 
 namespace slow {
-// Heapsort: correct but ~2-3x slower on large inputs. Swap it in for
-// perfkit::sort_ints to plant a realistic algorithmic regression.
+// std::qsort: correct, but every comparison is an indirect call that the
+// compiler cannot inline. Swap it in for perfkit::sort_ints to plant a
+// realistic regression. (Heapsort was tried first, but under MSVC it beats
+// std::sort below ~1M elements, so it is not a reliable plant.)
 void sort_ints(std::span<std::int64_t> values);
 }  // namespace slow
 

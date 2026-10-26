@@ -1,6 +1,7 @@
 #include "perfkit/sort.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace perfkit {
 
@@ -11,8 +12,11 @@ void sort_ints(std::span<std::int64_t> values) {
 namespace slow {
 
 void sort_ints(std::span<std::int64_t> values) {
-    std::make_heap(values.begin(), values.end());
-    std::sort_heap(values.begin(), values.end());
+    std::qsort(values.data(), values.size(), sizeof(std::int64_t), [](const void* a, const void* b) {
+        const auto x = *static_cast<const std::int64_t*>(a);
+        const auto y = *static_cast<const std::int64_t*>(b);
+        return (x > y) - (x < y);
+    });
 }
 
 }  // namespace slow
