@@ -86,3 +86,33 @@ uv run bot compare --base HEAD --head HEAD --head-cmake-arg=-DPERFKIT_INJECT_SLO
 ```
 
 On Windows, keep the repository at a short path: MSBuild fails on paths over 260 characters.
+
+## CI (GitHub Actions)
+
+Two workflows run on every pull request:
+
+1. **`benchmarks`** ([bench.yml](.github/workflows/bench.yml)) checks out the PR, builds the
+   pinned toolchain image ([docker/Dockerfile](docker/Dockerfile): Ubuntu 24.04, GCC, CMake, uv),
+   and runs `bot compare` inside it against the merge-base. It has a read-only token, uploads
+   `results.json`, `comment.md` and the raw timings as an artifact, and fails only if the run
+   itself breaks.
+2. **`benchmark report`** ([bench-report.yml](.github/workflows/bench-report.yml)) is triggered by
+   the first via `workflow_run`. It runs the default branch's code with a write token, sets a
+   `benchwatch` commit status (pending → success/failure), and posts or updates a single PR comment.
+
+Running PR code and holding a write token never happen in the same job. That's what makes
+benchmarking PRs from forks safe. `bot publish` also refuses to post if the artifact's PR number
+doesn't match the commit GitHub reports for the run.
+
+To block merging on regressions, make the `benchwatch` status a required check in branch protection.
+
+Note: GitHub only runs `workflow_run` workflows that exist on the **default branch**, so the
+comment and status appear only after `bench-report.yml` has been merged there.
+
+Run the CI build locally (needs Docker):
+
+```sh
+docker build -f docker/Dockerfile -t benchwatch-toolchain .
+docker run --rm -v "$PWD:/work" benchwatch-toolchain sh -c \
+  'uv sync --frozen --no-dev && uv run --no-sync bot compare --base HEAD~1 --head HEAD --markdown out/comment.md'
+```

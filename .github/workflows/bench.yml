@@ -1,0 +1,93 @@
+# Runs the benchmark comparison for a pull request.
+#
+# This job executes code from the PR, so it gets a read-only token and never
+# talks to the GitHub API. It uploads its results as an artifact; the
+# `benchmark report` workflow (bench-report.yml) picks them up and posts the
+# comment and commit status with write permissions. That split is what makes
+# PRs from forks safe to benchmark.
+name: benchmarks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: benchwatch-toolchain:ci
+  # Narrow this to a fast subset if PR runs get too slow; run the full suite nightly.
+  BENCH_FILTER: ""
+  ROUNDS: "15"
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0  # merge-base and worktrees need full history
+
+      - name: Record PR identity
+        run: |
+          mkdir -p out
+          printf '{"number": %s, "head_sha": "%s"}\n' \
+            "${{ github.event.pull_request.number }}" "${{ github.event.pull_request.head.sha }}" > out/pr.json
+
+      - name: Compute merge-base
+        id: base
+        run: echo "sha=$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ hashFiles('docker/Dockerfile') }}-${{ github.event.pull_request.head.sha }}
+          restore-keys: ccache-${{ hashFiles('docker/Dockerfile') }}-
+
+      - name: Run comparison
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docker run --rm -v "$PWD:/work" \
+            -e CCACHE_DIR=/work/.ccache -e BASE_SHA -e HEAD_SHA -e BENCH_FILTER -e ROUNDS \
+            "$IMAGE" sh -euc '
+              uv sync --frozen --no-dev
+              uv run --no-sync bot compare \
+                --base "$BASE_SHA" --head "$HEAD_SHA" --rounds "$ROUNDS" \
+                ${BENCH_FILTER:+--filter "$BENCH_FILTER"} \
+                --cmake-arg=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                --results-dir out/raw --out out/results.json --markdown out/comment.md \
+                --no-fail-on-regression
+            '
+
+      - name: Write job summary
+        if: always()
+        run: '[ -f out/comment.md ] && cat out/comment.md >> "$GITHUB_STEP_SUMMARY" || true'
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchwatch
+          path: out/
+          retention-days: 14

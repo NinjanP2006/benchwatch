@@ -1,0 +1,57 @@
+# Publishes results of the `benchmarks` workflow: a pending status when it
+# starts, then one PR comment (updated in place) and a pass/fail status.
+#
+# workflow_run always runs the version of this file on the default branch,
+# with a write token, and never executes code from the PR. The artifact it
+# downloads is untrusted data; `bot publish` validates it before posting.
+name: benchmark report
+
+on:
+  workflow_run:
+    workflows: [benchmarks]
+    types: [requested, completed]
+
+permissions:
+  actions: read         # download the other run's artifact
+  contents: read
+  issues: write         # PR comments use the issues API
+  pull-requests: write
+  statuses: write
+
+jobs:
+  publish:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Check out default branch (trusted code)
+        uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Mark pending
+        if: github.event.action == 'requested'
+        run: uv run --no-dev bot pending --head-sha "$HEAD_SHA" --target-url "$RUN_URL"
+
+      - name: Download results
+        if: github.event.action == 'completed'
+        uses: actions/download-artifact@v4
+        continue-on-error: true  # missing artifact is handled by `bot publish`
+        with:
+          name: benchwatch
+          path: artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish comment and status
+        if: github.event.action == 'completed'
+        env:
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          mkdir -p artifact
+          uv run --no-dev bot publish artifact --head-sha "$HEAD_SHA" \
+            --conclusion "$CONCLUSION" --target-url "$RUN_URL"
