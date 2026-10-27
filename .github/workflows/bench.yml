@@ -82,7 +82,7 @@ jobs:
 
       - name: Write job summary
         if: always()
-        run: '[ -f out/comment.md ] && cat out/comment.md >> "$GITHUB_STEP_SUMMARY" || true'
+        run: if [ -f out/comment.md ]; then cat out/comment.md >> "$GITHUB_STEP_SUMMARY"; fi
 
       - name: Upload results
         if: always()
