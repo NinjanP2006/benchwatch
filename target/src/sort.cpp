@@ -6,7 +6,7 @@
 namespace perfkit {
 
 void sort_ints(std::span<std::int64_t> values) {
-    std::sort(values.begin(), values.end());
+    slow::sort_ints(values);
 }
 
 namespace slow {
