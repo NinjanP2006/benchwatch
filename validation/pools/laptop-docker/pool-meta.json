@@ -1,0 +1,41 @@
+{
+  "sha": "a9dbd884ed01ffab63fa4c36d09d9cc3bb440a4b",
+  "reference": [],
+  "variants": {
+    "aa": [],
+    "inject1": [
+      "-DPERFKIT_INJECT_SLOWDOWN_PCT=1"
+    ],
+    "inject3": [
+      "-DPERFKIT_INJECT_SLOWDOWN_PCT=3"
+    ],
+    "inject5": [
+      "-DPERFKIT_INJECT_SLOWDOWN_PCT=5"
+    ],
+    "inject10": [
+      "-DPERFKIT_INJECT_SLOWDOWN_PCT=10"
+    ]
+  },
+  "config": {
+    "rounds": 41,
+    "min_time_s": 0.1,
+    "benchmark_filter": null,
+    "source_dir": "target",
+    "bench_target": "bench",
+    "cpu": null
+  },
+  "started_at": "2026-11-12T20:41:08+00:00",
+  "host": {
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "processor": "x86_64",
+    "python": "3.12.3"
+  },
+  "effects": {
+    "aa": 0.0,
+    "inject1": 1.0,
+    "inject3": 3.0,
+    "inject5": 5.0,
+    "inject10": 10.0
+  }
+}

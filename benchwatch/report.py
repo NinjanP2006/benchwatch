@@ -168,6 +168,63 @@ def status_summary(analysis: Analysis) -> str:
     return text[:140]
 
 
+# ---- Validation results ------------------------------------------------------------
+
+def _validation_rows(summary) -> tuple[list[int], list[tuple[str, list[str]]]]:
+    """Rows of (label, cells per round count) for one threshold's summary."""
+    rounds = sorted(summary["rounds"].unique())
+    rows: list[tuple[str, list[str]]] = []
+
+    def cells(sel, column):
+        by_n = sel.set_index("rounds")[column]
+        return [f"{by_n[n]:.1%}" for n in rounds]
+
+    for variant, sel in summary.groupby("variant", sort=False):
+        first = sel.iloc[0]
+        if first["nominal_pct"] == 0:
+            measured = f"{first['measured_pct']:+.1f}%"
+            rows.append((f"A/A ({measured}): runs with any false flag", cells(sel, "any_flag_rate")))
+            rows.append(("A/A: benchmarks inconclusive", cells(sel, "inconclusive_rate")))
+        else:
+            rows.append((f"+{first['nominal_pct']:g}% injected ({first['measured_pct']:+.1f}% measured): "
+                         f"flagged as regression", cells(sel, "regression_rate")))
+    return rounds, rows
+
+
+def render_validation(summary, console: Console, threshold: float) -> None:
+    rounds, rows = _validation_rows(summary)
+    table = Table(title=f"threshold ±{threshold:.0%}".replace("±", "+/-"), title_justify="left")
+    table.add_column("Variant")
+    for n in rounds:
+        table.add_column(f"N={n}", justify="right")
+    for label, values in rows:
+        table.add_row(label, *values)
+    console.print(table)
+
+
+def validation_markdown(summary, pool, headline: str, trials: int, alpha: float, warmup: int) -> str:
+    meta = pool.meta
+    cfg = meta.get("config", {})
+    lines = ["# Validation report", "", f"**{headline}**", "",
+             f"Pool: commit `{meta['sha'][:7]}`, {len(pool.benchmarks)} benchmarks, {pool.rounds} usable rounds "
+             f"(after {warmup} warmup), collected {meta.get('started_at', '?')} on "
+             f"{meta.get('host', {}).get('platform', '?')}"
+             + (f", pinned to CPU {cfg['cpu']}" if cfg.get("cpu") else "") + ".",
+             f"Each cell is the mean over {trials} virtual runs of N rounds drawn without replacement "
+             f"from the pool; α = {alpha} family-wise (Holm).", "",
+             "Rows with injected slowdowns give the per-benchmark detection rate. The A/A rows compare "
+             "two runs of the identical binary: *any false flag* is the share of virtual PR runs in which "
+             "at least one benchmark was wrongly flagged.", ""]
+    for t, sel in summary.groupby("threshold"):
+        rounds, rows = _validation_rows(sel)
+        lines += [f"## Threshold ±{t:.0%}", "",
+                  "| | " + " | ".join(f"N={n}" for n in rounds) + " |",
+                  "|---|" + "--:|" * len(rounds)]
+        lines += [f"| {label} | " + " | ".join(values) + " |" for label, values in rows]
+        lines.append("")
+    return "\n".join(lines)
+
+
 def to_dict(analysis: Analysis) -> dict:
     def clean(x):
         return None if isinstance(x, float) and not math.isfinite(x) else x

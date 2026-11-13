@@ -9,7 +9,8 @@ import pandas as pd
 COLUMNS = ["benchmark", "side", "round", "real_time_ns", "cpu_time_ns", "iterations"]
 
 _TIME_UNIT_NS = {"ns": 1.0, "us": 1e3, "ms": 1e6, "s": 1e9}
-_FILENAME = re.compile(r"round(\d+)_(base|head)\.json")
+# Side is "base"/"head" for comparisons, or a variant label for validation pools.
+_FILENAME = re.compile(r"round(\d+)_([A-Za-z0-9-]+)\.json")
 
 
 def parse_benchmark_json(data: dict, side: str, round_index: int) -> list[dict]:

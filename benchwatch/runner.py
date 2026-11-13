@@ -39,6 +39,20 @@ class RunConfig:
     benchmark_filter: str | None = None
     source_dir: str = "target"
     bench_target: str = "bench"
+    cpu: str | None = None  # pin benchmark processes with `taskset -c` (Linux only)
+
+
+def host_info() -> dict:
+    return {
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "python": sys.version.split()[0],
+    }
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass
@@ -46,13 +60,8 @@ class RunMeta:
     base: Side
     head: Side
     config: RunConfig
-    started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    host: dict = field(default_factory=lambda: {
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "python": sys.version.split()[0],
-    })
+    started_at: str = field(default_factory=utc_now)
+    host: dict = field(default_factory=host_info)
 
 
 # ---- git -------------------------------------------------------------------
@@ -146,7 +155,8 @@ def result_path(run_dir: Path, round_index: int, side: str) -> Path:
 
 
 def run_benchmark(exe: Path, out: Path, config: RunConfig) -> None:
-    cmd = [str(exe), f"--benchmark_out={out}", "--benchmark_out_format=json",
+    pin = ["taskset", "-c", config.cpu] if config.cpu is not None else []
+    cmd = [*pin, str(exe), f"--benchmark_out={out}", "--benchmark_out_format=json",
            "--benchmark_repetitions=1", f"--benchmark_min_time={config.min_time_s}s"]
     if config.benchmark_filter:
         cmd.append(f"--benchmark_filter={config.benchmark_filter}")
@@ -180,3 +190,65 @@ def run_comparison(
         log(f"[{i}/{len(plan)}] round {round_index + 1}/{config.rounds} {side}")
         run_benchmark(exes[side], result_path(run_dir, round_index, side), config)
     return meta
+
+
+# ---- validation pools --------------------------------------------------------
+
+REF_SUFFIX = "-ref"
+
+
+def paired_schedule(rounds: int, labels: Sequence[str]) -> list[tuple[int, str]]:
+    """Every label runs back to back with its own reference run, exactly like base
+    and head in `compare`, so the pool has the same pairing noise as a real PR run.
+    Pairs alternate order by round (ref-first, then variant-first), and the order of
+    the pairs rotates so no variant is always first or last in a round."""
+    order: list[tuple[int, str]] = []
+    k = len(labels)
+    for r in range(rounds):
+        for i in range(k):
+            label = labels[(r + i) % k]
+            pair = [label + REF_SUFFIX, label]
+            order += [(r, side) for side in (pair if r % 2 == 0 else pair[::-1])]
+    return order
+
+
+def collect_pool(
+    repo: Path,
+    sha: str,
+    reference_args: tuple[str, ...],
+    variants: dict[str, tuple[str, ...]],
+    config: RunConfig,
+    cache_dir: Path,
+    pool_dir: Path,
+    extra_meta: dict | None = None,
+    log: Callable[[str], None] = print,
+) -> None:
+    """Build one commit as a reference plus one build per variant (label -> extra
+    CMake args), then run each variant paired with an adjacent reference run.
+    A variant whose args equal the reference's reuses its executable, which is
+    how A/A pairs are produced."""
+    worktree = ensure_worktree(repo, sha, cache_dir)
+    built: dict[tuple[str, ...], Path] = {}
+
+    def exe_for(args: tuple[str, ...]) -> Path:
+        if args not in built:
+            log(f"building {sha[:12]} {' '.join(args) or '(no extra args)'}")
+            built[args] = build(Side("pool", sha, sha, args), worktree, cache_dir, config)
+        return built[args]
+
+    reference = exe_for(reference_args)
+    exes = {label: exe_for(args) for label, args in variants.items()}
+    exes |= {label + REF_SUFFIX: reference for label in variants}
+
+    pool_dir.mkdir(parents=True, exist_ok=False)
+    meta = {"sha": sha, "reference": list(reference_args),
+            "variants": {k: list(v) for k, v in variants.items()}, "config": asdict(config),
+            "started_at": utc_now(), "host": host_info(), **(extra_meta or {})}
+    (pool_dir / "pool-meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    plan = paired_schedule(config.rounds, list(variants))
+    per_round = 2 * len(variants)
+    for i, (round_index, side) in enumerate(plan):
+        if i % per_round == 0:
+            log(f"round {round_index + 1}/{config.rounds}")
+        run_benchmark(exes[side], result_path(pool_dir, round_index, side), config)

@@ -132,6 +132,27 @@ def paired_times(df: pd.DataFrame, warmup: int) -> pd.DataFrame:
     return wide.dropna(subset=[c for c in ("base", "head") if c in wide.columns])
 
 
+def compare_pairs(pairs: list[tuple[str, np.ndarray, np.ndarray]], params: Params,
+                  rng: np.random.Generator) -> list[BenchmarkResult]:
+    """Core of the analysis: (name, base times, head times) per benchmark, rounds aligned."""
+    raw: list[dict] = []
+    for name, base, head in pairs:
+        ratios = head / base
+        log_ratios = np.log(ratios)
+        n = len(ratios)
+        if n >= 2:
+            ci_low, ci_high = bootstrap_median_ci(ratios, params.confidence, params.n_boot, rng)
+            p = signed_rank_p(log_ratios)
+        else:
+            ci_low, ci_high, p = -math.inf, math.inf, 1.0
+        raw.append(dict(benchmark=name, n=n, base_median_ns=float(np.median(base)),
+                        head_median_ns=float(np.median(head)), ratio=float(np.median(ratios)),
+                        ci_low=ci_low, ci_high=ci_high, p_value=p, outliers=count_outliers(log_ratios)))
+
+    return [BenchmarkResult(**r, p_adjusted=p_adj, verdict=classify(p_adj, r["ci_low"], r["ci_high"], params))
+            for r, p_adj in zip(raw, holm([r["p_value"] for r in raw]))]
+
+
 def analyze(df: pd.DataFrame, params: Params = Params()) -> Analysis:
     rng = np.random.default_rng(params.seed)
     order = list(dict.fromkeys(df["benchmark"]))  # suite order, as first seen
@@ -151,27 +172,10 @@ def analyze(df: pd.DataFrame, params: Params = Params()) -> Analysis:
         return analysis
 
     wide = paired_times(df[df["benchmark"].isin(common)], params.warmup)
-    raw: list[dict] = []
-    for name in common:
-        if name not in wide.index.get_level_values(0):
-            continue
-        pairs = wide.loc[name]
-        base, head = pairs["base"].to_numpy(), pairs["head"].to_numpy()
-        ratios = head / base
-        log_ratios = np.log(ratios)
-        n = len(ratios)
-        if n >= 2:
-            ci_low, ci_high = bootstrap_median_ci(ratios, params.confidence, params.n_boot, rng)
-            p = signed_rank_p(log_ratios)
-        else:
-            ci_low, ci_high, p = -math.inf, math.inf, 1.0
-        raw.append(dict(benchmark=name, n=n, base_median_ns=float(np.median(base)),
-                        head_median_ns=float(np.median(head)), ratio=float(np.median(ratios)),
-                        ci_low=ci_low, ci_high=ci_high, p_value=p, outliers=count_outliers(log_ratios)))
-
-    for r, p_adj in zip(raw, holm([r["p_value"] for r in raw])):
-        verdict = classify(p_adj, r["ci_low"], r["ci_high"], params)
-        analysis.results.append(BenchmarkResult(**r, p_adjusted=p_adj, verdict=verdict))
+    present = set(wide.index.get_level_values(0))
+    pairs = [(name, wide.loc[name]["base"].to_numpy(), wide.loc[name]["head"].to_numpy())
+             for name in common if name in present]
+    analysis.results = compare_pairs(pairs, params, rng)
 
     n_min = min(r.n for r in analysis.results)
     needed = min_rounds_for(len(analysis.results), params.alpha)

@@ -1,0 +1,70 @@
+# Collects a validation pool on a GitHub-hosted runner and estimates the
+# detector's detection and false-alarm rates there. Run manually from the
+# Actions tab; download the `validation-pool` artifact and commit its
+# pool.csv / pool-meta.json under validation/pools/ to keep the evidence.
+name: validate
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rounds to collect (each runs every variant once)
+        default: "41"
+      inject:
+        description: Injected slowdowns, percent
+        default: "1,3,5,10"
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      IMAGE: benchwatch-toolchain:ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Collect pool
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+          INJECT: ${{ inputs.inject }}
+        run: |
+          docker run --rm -v "$PWD:/work" -e ROUNDS -e INJECT "$IMAGE" sh -euc '
+            uv sync --frozen --no-dev
+            uv run --no-sync bot collect --rounds "$ROUNDS" --inject "$INJECT" --out out/pool
+          '
+
+      - name: Simulate
+        run: |
+          docker run --rm -v "$PWD:/work" "$IMAGE" sh -euc '
+            uv sync --frozen --no-dev
+            uv run --no-sync bot simulate out/pool --out-dir out/results
+          '
+          cat out/results/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload pool and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-pool
+          path: |
+            out/pool/pool.csv
+            out/pool/pool-meta.json
+            out/results/
+          retention-days: 30

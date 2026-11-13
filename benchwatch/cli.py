@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from benchwatch import github, parse, report, runner
+from benchwatch import github, parse, report, runner, validate
 from benchwatch.stats import Params, analyze
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
@@ -25,6 +25,23 @@ WarmupOpt = Annotated[int, typer.Option(help="Leading rounds to discard.")]
 OutOpt = Annotated[Optional[Path], typer.Option("--out", help="Also write the analysis as JSON to this file.")]
 MarkdownOpt = Annotated[Optional[Path], typer.Option("--markdown", help="Also write a PR-comment Markdown report.")]
 FailOpt = Annotated[bool, typer.Option(help="Exit with status 1 if any regression is found.")]
+
+# Shared run options for `compare` and `collect`.
+MinTimeOpt = Annotated[float, typer.Option(help="Google Benchmark min time per benchmark per run, seconds.")]
+FilterOpt = Annotated[Optional[str], typer.Option("--filter", help="Regex passed to --benchmark_filter.")]
+CmakeArgOpt = Annotated[Optional[list[str]], typer.Option(help="Extra CMake arg for every build (repeatable), e.g. a compiler launcher.")]
+CpuOpt = Annotated[Optional[str], typer.Option(help="Pin benchmark runs to these CPUs with taskset (Linux), e.g. '2' or '2,3'.")]
+RepoPathOpt = Annotated[Path, typer.Option(help="Repository to benchmark.")]
+SourceDirOpt = Annotated[str, typer.Option(help="CMake source directory, relative to the repo root.")]
+BenchTargetOpt = Annotated[str, typer.Option(help="CMake target of the benchmark executable.")]
+
+
+def _float_list(text: str) -> list[float]:
+    return [float(x) for x in text.split(",") if x.strip()]
+
+
+def _int_list(text: str) -> list[int]:
+    return [int(x) for x in text.split(",") if x.strip()]
 
 
 def _title(meta: dict) -> str:
@@ -55,14 +72,15 @@ def compare(
     head: Annotated[str, typer.Option(help="Head revision.")] = "HEAD",
     main: Annotated[str, typer.Option(help="Branch used to compute the default base.")] = "main",
     rounds: Annotated[int, typer.Option(min=2, help="Interleaved rounds (each runs base and head once).")] = 15,
-    min_time: Annotated[float, typer.Option(help="Google Benchmark min time per benchmark per run, seconds.")] = 0.1,
-    benchmark_filter: Annotated[Optional[str], typer.Option("--filter", help="Regex passed to --benchmark_filter.")] = None,
-    cmake_arg: Annotated[Optional[list[str]], typer.Option(help="Extra CMake arg for both sides (repeatable), e.g. a compiler launcher.")] = None,
+    min_time: MinTimeOpt = 0.1,
+    benchmark_filter: FilterOpt = None,
+    cmake_arg: CmakeArgOpt = None,
     base_cmake_arg: Annotated[Optional[list[str]], typer.Option(help="Extra CMake arg for base (repeatable). Use the --opt=value form.")] = None,
     head_cmake_arg: Annotated[Optional[list[str]], typer.Option(help="Extra CMake arg for head (repeatable). Use the --opt=value form.")] = None,
-    repo: Annotated[Path, typer.Option(help="Repository to benchmark.")] = Path("."),
-    source_dir: Annotated[str, typer.Option(help="CMake source directory, relative to the repo root.")] = "target",
-    bench_target: Annotated[str, typer.Option(help="CMake target of the benchmark executable.")] = "bench",
+    cpu: CpuOpt = None,
+    repo: RepoPathOpt = Path("."),
+    source_dir: SourceDirOpt = "target",
+    bench_target: BenchTargetOpt = "bench",
     results_dir: Annotated[Optional[Path], typer.Option(help="Where raw run data goes. Default: <repo>/results.")] = None,
     alpha: AlphaOpt = 0.01,
     threshold: ThresholdOpt = 0.03,
@@ -89,7 +107,7 @@ def compare(
             console.print("[yellow]base and head are identical: this is an A/A comparison[/]")
 
         config = runner.RunConfig(rounds=rounds, min_time_s=min_time, benchmark_filter=benchmark_filter,
-                                  source_dir=source_dir, bench_target=bench_target)
+                                  source_dir=source_dir, bench_target=bench_target, cpu=cpu)
         run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{base_sha[:7]}-{head_sha[:7]}"
         run_dir = (results_dir or root / "results") / run_id
 
@@ -117,6 +135,82 @@ def analyze_cmd(
     """Re-run the statistics on saved results, e.g. to try other thresholds."""
     _analyze_and_report(run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup), out, markdown,
                         fail_on_regression)
+
+
+@app.command()
+def collect(
+    out: Annotated[Path, typer.Option(help="New directory for the pool.")],
+    rev: Annotated[str, typer.Option(help="Revision to build every variant from.")] = "HEAD",
+    rounds: Annotated[int, typer.Option(min=2, help="Rounds; each runs every variant once, next to its own reference run.")] = 40,
+    inject: Annotated[str, typer.Option(help="Comma-separated slowdowns to inject, in percent.")] = "1,3,5,10",
+    inject_var: Annotated[str, typer.Option(help="CMake variable that sets the injected slowdown.")] = "PERFKIT_INJECT_SLOWDOWN_PCT",
+    min_time: MinTimeOpt = 0.1,
+    benchmark_filter: FilterOpt = None,
+    cmake_arg: CmakeArgOpt = None,
+    cpu: CpuOpt = None,
+    repo: RepoPathOpt = Path("."),
+    source_dir: SourceDirOpt = "target",
+    bench_target: BenchTargetOpt = "bench",
+) -> None:
+    """Collect a validation pool: one commit at several injected slowdowns, run round-robin."""
+    try:
+        root = runner.repo_root(repo)
+        sha = runner.resolve_sha(root, rev)
+        variants, effects = validate.variant_plan(_float_list(inject), inject_var)
+        shared = tuple(cmake_arg or ())
+        variants = {label: shared + args for label, args in variants.items()}
+        config = runner.RunConfig(rounds=rounds, min_time_s=min_time, benchmark_filter=benchmark_filter,
+                                  source_dir=source_dir, bench_target=bench_target, cpu=cpu)
+        runner.collect_pool(root, sha, shared, variants, config, root / CACHE_DIRNAME, out,
+                            extra_meta={"effects": effects}, log=lambda msg: console.print(f"[dim]{msg}[/]"))
+    except runner.RunnerError as e:
+        console.print(f"[bold red]error:[/] {e}")
+        raise typer.Exit(code=2)
+    parse.load_run(out).to_csv(out / validate.POOL_CSV, index=False)
+    console.print(f"pool written to {out} ({rounds} rounds x {len(variants)} variant pairs)")
+
+
+@app.command(name="simulate")
+def simulate_cmd(
+    pool_dir: Annotated[Path, typer.Argument(help="A pool written by `bot collect`.", exists=True, file_okay=False)],
+    rounds: Annotated[str, typer.Option(help="Comma-separated round counts to evaluate.")] = "5,10,15,20,30",
+    threshold: Annotated[str, typer.Option(help="Comma-separated thresholds to evaluate.")] = "0.02,0.03,0.05",
+    trials: Annotated[int, typer.Option(help="Virtual runs per round count.")] = 300,
+    alpha: AlphaOpt = 0.01,
+    warmup: WarmupOpt = 1,
+    seed: Annotated[int, typer.Option(help="Resampling seed.")] = 0,
+    out_dir: Annotated[Optional[Path], typer.Option(help="Write summary.csv, per_benchmark.csv and REPORT.md here.")] = None,
+    headline_rounds: Annotated[int, typer.Option(help="Round count used for the headline sentence.")] = 15,
+    plot: Annotated[bool, typer.Option(help="Also render charts into --out-dir (needs the 'plot' extra).")] = False,
+) -> None:
+    """Estimate detection and false-positive rates by resampling a pool."""
+    pool = validate.load_pool(pool_dir, warmup=warmup)
+    thresholds = _float_list(threshold)
+    console.print(f"pool: {len(pool.benchmarks)} benchmarks x {pool.rounds} usable rounds; "
+                  f"variants {', '.join(pool.effects)}")
+    try:
+        sim = validate.simulate(pool, _int_list(rounds), thresholds, trials, alpha=alpha, seed=seed)
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    summary = validate.summarize(sim, pool)
+
+    for t in thresholds:
+        report.render_validation(summary[summary["threshold"] == t], console, t)
+    headline_threshold = 0.03 if 0.03 in thresholds else thresholds[0]
+    line = validate.headline(summary, headline_rounds, headline_threshold)
+    console.print(f"\n[bold]{line}[/]")
+
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary.to_csv(out_dir / "summary.csv", index=False)
+        validate.per_benchmark(sim).to_csv(out_dir / "per_benchmark.csv", index=False)
+        (out_dir / "REPORT.md").write_text(
+            report.validation_markdown(summary, pool, line, trials, alpha, warmup), encoding="utf-8")
+        if plot:
+            from benchwatch import plot as plotting
+            for theme in ("light", "dark"):
+                plotting.render(summary, headline_threshold, out_dir / f"validation-{theme}.png", theme)
+        console.print(f"wrote {out_dir}")
 
 
 RepoOpt = Annotated[Optional[str], typer.Option("--repo", help="owner/name. Default: $GITHUB_REPOSITORY.")]
