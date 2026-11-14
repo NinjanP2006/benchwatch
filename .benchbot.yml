@@ -1,0 +1,20 @@
+# Benchwatch settings for this repository. Every key is optional; a flag on the
+# command line overrides the value here. `bot --help` lists the commands.
+
+# Build
+source_dir: target          # CMake source directory, relative to the repo root
+bench_target: bench         # CMake target that builds the Google Benchmark executable
+
+# Running
+rounds: 15                  # interleaved rounds per comparison (base and head once each)
+warmup: 1                   # leading rounds discarded
+min_time: 0.1               # Google Benchmark min time per benchmark per run, seconds
+filter: null                # regex of benchmarks to run, e.g. "BM_Sort|BM_Parse" for a fast PR subset
+
+# Verdicts
+alpha: 0.01                 # family-wise significance level (Holm-corrected across benchmarks)
+threshold: 0.03             # smallest change that counts as a regression or improvement
+ignore: []                  # regexes of benchmarks to run but never judge, e.g. known-noisy ones
+
+# History
+window: 10                  # commits on each side of a candidate level shift

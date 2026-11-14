@@ -44,6 +44,14 @@ def load_run(run_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
+def drop_ignored(df: pd.DataFrame, patterns: list[str] | None) -> pd.DataFrame:
+    """Remove benchmarks whose name matches any regex (re.search)."""
+    if not patterns:
+        return df
+    regex = re.compile("|".join(f"(?:{p})" for p in patterns))
+    return df[~df["benchmark"].map(lambda name: bool(regex.search(name)))]
+
+
 def load_context(run_dir: Path) -> dict:
     """Google Benchmark's machine context (CPU, caches, load) from the first result file."""
     first = next(iter(sorted(run_dir.glob("round*_*.json"))), None)

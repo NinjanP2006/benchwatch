@@ -1,0 +1,155 @@
+name: Benchwatch
+description: Flags statistically meaningful benchmark regressions in pull requests (C++ / Google Benchmark / CMake).
+author: NinjanP2006
+branding:
+  icon: activity
+  color: blue
+
+inputs:
+  mode:
+    description: >
+      compare: benchmark the PR head against its merge-base and upload the results (pull_request workflow).
+      pending / publish: set the commit status and post the PR comment (workflow_run workflow).
+      record: compare a pushed commit with its parent and append it to a history database (push workflow).
+    default: compare
+  config:
+    description: >
+      Settings file, relative to the repository root. In compare mode it is read from the BASE commit,
+      so a pull request cannot loosen its own check.
+    default: .benchbot.yml
+  base:
+    description: Base revision (compare/record). Default - merge-base with the PR base, or the parent commit.
+    default: ""
+  head:
+    description: Head revision (compare/record). Default - the PR head, or HEAD.
+    default: ""
+  args:
+    description: Extra arguments for `bot compare`, e.g. --cmake-arg=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    default: ""
+  output-dir:
+    description: Where results are written.
+    default: benchwatch-out
+  artifact-name:
+    description: Artifact shared between the compare and publish workflows.
+    default: benchwatch
+  db:
+    description: History database to append to (record mode).
+    default: benchwatch-history.db
+  github-token:
+    description: Token for statuses and comments (pending/publish).
+    default: ${{ github.token }}
+
+outputs:
+  regressions:
+    description: Number of benchmarks with a regression verdict (compare/record).
+    value: ${{ steps.compare.outputs.regressions }}
+  results:
+    description: Path of results.json (compare/record).
+    value: ${{ steps.compare.outputs.results }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v5
+
+    - name: Install Benchwatch
+      shell: bash
+      run: uv sync --project "$GITHUB_ACTION_PATH" --frozen --no-dev --quiet
+
+    - name: Compare
+      id: compare
+      if: inputs.mode == 'compare' || inputs.mode == 'record'
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_HEAD: ${{ inputs.head }}
+        INPUT_ARGS: ${{ inputs.args }}
+        CONFIG: ${{ inputs.config }}
+        OUT: ${{ inputs.output-dir }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
+          echo "::error::Benchwatch needs full git history: use actions/checkout with fetch-depth: 0"
+          exit 1
+        fi
+        head=$(git rev-parse "${INPUT_HEAD:-${PR_HEAD_SHA:-HEAD}}^{commit}")
+        if [ -n "$INPUT_BASE" ]; then
+          base=$(git rev-parse "$INPUT_BASE^{commit}")
+        elif [ -n "$PR_BASE_SHA" ]; then
+          base=$(git merge-base "$PR_BASE_SHA" "$head")
+        else
+          base=$(git rev-parse "$head^1")
+        fi
+        mkdir -p "$OUT"
+        # Settings come from the base commit; missing there means built-in defaults.
+        git show "$base:$CONFIG" > "$OUT/config.yml" 2>/dev/null || : > "$OUT/config.yml"
+        if [ -n "$PR_NUMBER" ]; then
+          printf '{"number": %s, "head_sha": "%s"}\n' "$PR_NUMBER" "$head" > "$OUT/pr.json"
+        fi
+        read -ra extra <<< "$INPUT_ARGS"
+        uv run --project "$GITHUB_ACTION_PATH" --frozen --no-dev bot --config "$OUT/config.yml" compare \
+          --base "$base" --head "$head" --results-dir "$OUT/raw" \
+          --out "$OUT/results.json" --markdown "$OUT/comment.md" --no-fail-on-regression "${extra[@]}"
+        regressions=$(uv run --project "$GITHUB_ACTION_PATH" --frozen --no-dev python -c \
+          'import json, sys; print(json.load(open(sys.argv[1]))["summary"]["regression"])' "$OUT/results.json")
+        {
+          echo "regressions=$regressions"
+          echo "results=$OUT/results.json"
+        } >> "$GITHUB_OUTPUT"
+        cat "$OUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload results
+      if: inputs.mode == 'compare' && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.output-dir }}/
+        retention-days: 14
+
+    - name: Record
+      if: inputs.mode == 'record'
+      shell: bash
+      env:
+        OUT: ${{ inputs.output-dir }}
+        DB: ${{ inputs.db }}
+      run: |
+        set -euo pipefail
+        runs=("$OUT"/raw/*/)
+        uv run --project "$GITHUB_ACTION_PATH" --frozen --no-dev bot --config "$OUT/config.yml" \
+          record "${runs[0]}" --db "$DB"
+
+    - name: Mark pending
+      if: inputs.mode == 'pending'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        RUN_URL: ${{ github.event.workflow_run.html_url }}
+      run: uv run --project "$GITHUB_ACTION_PATH" --frozen --no-dev bot pending --head-sha "$HEAD_SHA" --target-url "$RUN_URL"
+
+    - name: Download results
+      if: inputs.mode == 'publish'
+      uses: actions/download-artifact@v4
+      continue-on-error: true  # a missing artifact is reported by `bot publish`
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/benchwatch-artifact
+        run-id: ${{ github.event.workflow_run.id }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: Publish comment and status
+      if: inputs.mode == 'publish'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        RUN_URL: ${{ github.event.workflow_run.html_url }}
+        CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        ARTIFACT: ${{ runner.temp }}/benchwatch-artifact
+      run: |
+        mkdir -p "$ARTIFACT"
+        uv run --project "$GITHUB_ACTION_PATH" --frozen --no-dev bot publish "$ARTIFACT" \
+          --head-sha "$HEAD_SHA" --conclusion "$CONCLUSION" --target-url "$RUN_URL"

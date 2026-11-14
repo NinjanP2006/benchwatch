@@ -1,4 +1,4 @@
-"""Command-line entry point: `bot compare`, `bot analyze`, `bot clean`."""
+"""Command-line entry point: `bot compare`, `bot analyze`, `bot history`, ..."""
 
 import json
 import shutil
@@ -10,10 +10,10 @@ import typer
 from rich.console import Console
 
 from benchwatch import changepoint, github, parse, report, runner, store, validate
+from benchwatch import config as configuration
 from benchwatch.stats import Params, analyze
 
-app = typer.Typer(no_args_is_help=True, add_completion=False,
-                  help="Detect statistically meaningful benchmark regressions between two commits.")
+app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
 
 CACHE_DIRNAME = ".benchwatch"
@@ -25,6 +25,7 @@ WarmupOpt = Annotated[int, typer.Option(help="Leading rounds to discard.")]
 OutOpt = Annotated[Optional[Path], typer.Option("--out", help="Also write the analysis as JSON to this file.")]
 MarkdownOpt = Annotated[Optional[Path], typer.Option("--markdown", help="Also write a PR-comment Markdown report.")]
 FailOpt = Annotated[bool, typer.Option(help="Exit with status 1 if any regression is found.")]
+IgnoreOpt = Annotated[Optional[list[str]], typer.Option(help="Regex of benchmarks to leave out of verdicts (repeatable).")]
 
 # Shared run options for `compare` and `collect`.
 MinTimeOpt = Annotated[float, typer.Option(help="Google Benchmark min time per benchmark per run, seconds.")]
@@ -49,12 +50,30 @@ def _title(meta: dict) -> str:
             f"head {meta['head']['rev']} ({meta['head']['sha'][:7]})")
 
 
+@app.callback()
+def main(
+    ctx: typer.Context,
+    config: Annotated[Optional[Path], typer.Option(
+        "--config", help=f"Defaults for every command. Default: {configuration.DEFAULT_PATH} if present.")] = None,
+) -> None:
+    """Detect statistically meaningful benchmark regressions between two commits."""
+    path = config or (configuration.DEFAULT_PATH if configuration.DEFAULT_PATH.exists() else None)
+    if path is None:
+        return
+    try:
+        ctx.default_map = configuration.default_map(configuration.load(path))
+    except configuration.ConfigError as e:
+        console.print(f"[bold red]config error:[/] {e}")
+        raise typer.Exit(code=2)
+    ctx.obj = {"config_path": path}
+
+
 def _analyze_and_report(run_dir: Path, params: Params, out: Path | None, markdown: Path | None,
-                        fail_on_regression: bool) -> None:
+                        fail_on_regression: bool, ignore: list[str] | None = None) -> None:
     meta_path = run_dir / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
 
-    analysis = analyze(parse.load_run(run_dir), params)
+    analysis = analyze(parse.drop_ignored(parse.load_run(run_dir), ignore), params)
     report.render(analysis, console, title=_title(meta) if meta else str(run_dir))
     for path, text in ((out, lambda: json.dumps(report.to_dict(analysis), indent=2)),
                        (markdown, lambda: report.to_markdown(analysis, meta, parse.load_context(run_dir)))):
@@ -68,6 +87,7 @@ def _analyze_and_report(run_dir: Path, params: Params, out: Path | None, markdow
 
 @app.command()
 def compare(
+    ctx: typer.Context,
     base: Annotated[Optional[str], typer.Option(help="Base revision. Default: merge-base of --main and --head.")] = None,
     head: Annotated[str, typer.Option(help="Head revision.")] = "HEAD",
     main: Annotated[str, typer.Option(help="Branch used to compute the default base.")] = "main",
@@ -87,9 +107,12 @@ def compare(
     warmup: WarmupOpt = 1,
     out: OutOpt = None,
     markdown: MarkdownOpt = None,
+    ignore: IgnoreOpt = None,
     fail_on_regression: FailOpt = True,
 ) -> None:
     """Build two revisions and compare their benchmarks with interleaved runs."""
+    if ctx.obj:
+        console.print(f"[dim]config: {ctx.obj['config_path']}[/]")
     if warmup >= rounds:
         raise typer.BadParameter("--warmup must be smaller than --rounds")
     try:
@@ -121,7 +144,7 @@ def compare(
 
     console.print(f"raw results: {run_dir}")
     _analyze_and_report(run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup), out, markdown,
-                        fail_on_regression)
+                        fail_on_regression, ignore)
 
 
 @app.command(name="analyze")
@@ -132,11 +155,12 @@ def analyze_cmd(
     warmup: WarmupOpt = 1,
     out: OutOpt = None,
     markdown: MarkdownOpt = None,
+    ignore: IgnoreOpt = None,
     fail_on_regression: FailOpt = True,
 ) -> None:
     """Re-run the statistics on saved results, e.g. to try other thresholds."""
     _analyze_and_report(run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup), out, markdown,
-                        fail_on_regression)
+                        fail_on_regression, ignore)
 
 
 @app.command()
@@ -225,9 +249,10 @@ def record_cmd(
     alpha: AlphaOpt = 0.01,
     threshold: ThresholdOpt = 0.03,
     warmup: WarmupOpt = 1,
+    ignore: IgnoreOpt = None,
 ) -> None:
     """Add a comparison run to the history database."""
-    rec = store.record(db, run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup))
+    rec = store.record(db, run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup), ignore)
     console.print(f"{'replaced' if rec.replaced else 'recorded'} {rec.sha[:7]}: {rec.benchmarks} benchmarks in {db}")
 
 

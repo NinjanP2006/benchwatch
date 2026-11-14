@@ -60,11 +60,11 @@ class Recorded:
     replaced: bool
 
 
-def record(db: Path, run_dir: Path, params: Params = Params()) -> Recorded:
+def record(db: Path, run_dir: Path, params: Params = Params(), ignore: list[str] | None = None) -> Recorded:
     """Store a `bot compare` run (head vs its parent). Re-recording the same commit
     on the same CPU model replaces the earlier row, so retried CI jobs are harmless."""
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    analysis: Analysis = analyze(parse.load_run(run_dir), params)
+    analysis: Analysis = analyze(parse.drop_ignored(parse.load_run(run_dir), ignore), params)
     head, base = meta["head"], meta["base"]
     cpu = meta["host"].get("cpu_model") or parse.load_context(run_dir).get("host_name", "unknown")
 

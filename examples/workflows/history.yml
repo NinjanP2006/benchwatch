@@ -1,0 +1,48 @@
+# Optional: record every commit on main and keep the database on a
+# `bench-data` branch, for `bot history` and level-shift detection.
+name: history
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bench-history
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the history branch
+        run: |
+          if git ls-remote --exit-code --heads origin bench-data > /dev/null; then
+            git fetch origin bench-data
+            git worktree add -B bench-data history origin/bench-data
+          else
+            git worktree add --orphan -b bench-data history
+          fi
+
+      # Install whatever your benchmarks need to build here.
+
+      - uses: NinjanP2006/benchmark@v1
+        with:
+          mode: record
+          db: history/benchwatch-history.db
+
+      - name: Push the database
+        working-directory: history
+        run: |
+          git add benchwatch-history.db
+          git diff --cached --quiet && exit 0
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Record benchmarks for ${GITHUB_SHA::7}"
+          git push origin bench-data

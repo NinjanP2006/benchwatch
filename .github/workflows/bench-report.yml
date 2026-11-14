@@ -23,35 +23,19 @@ jobs:
     if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      GITHUB_TOKEN: ${{ github.token }}
-      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-      RUN_URL: ${{ github.event.workflow_run.html_url }}
     steps:
       - name: Check out default branch (trusted code)
         uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
-
+      # This repo's own action (action.yml), the same one other repos use.
       - name: Mark pending
         if: github.event.action == 'requested'
-        run: uv run --no-dev bot pending --head-sha "$HEAD_SHA" --target-url "$RUN_URL"
-
-      - name: Download results
-        if: github.event.action == 'completed'
-        uses: actions/download-artifact@v4
-        continue-on-error: true  # missing artifact is handled by `bot publish`
+        uses: ./
         with:
-          name: benchwatch
-          path: artifact
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ github.token }}
+          mode: pending
 
       - name: Publish comment and status
         if: github.event.action == 'completed'
-        env:
-          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-        run: |
-          mkdir -p artifact
-          uv run --no-dev bot publish artifact --head-sha "$HEAD_SHA" \
-            --conclusion "$CONCLUSION" --target-url "$RUN_URL"
+        uses: ./
+        with:
+          mode: publish

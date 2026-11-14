@@ -1,0 +1,31 @@
+# Copy to .github/workflows/ next to benchmarks.yml. Runs from the default
+# branch with write access, never executes PR code, and posts one PR comment
+# plus a `benchwatch` commit status. Must be on the default branch to run.
+name: benchmark report
+
+on:
+  workflow_run:
+    workflows: [benchmarks]  # must match the name of benchmarks.yml
+    types: [requested, completed]
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  publish:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - if: github.event.action == 'requested'
+        uses: NinjanP2006/benchmark@v1
+        with:
+          mode: pending
+
+      - if: github.event.action == 'completed'
+        uses: NinjanP2006/benchmark@v1
+        with:
+          mode: publish

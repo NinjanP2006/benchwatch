@@ -1,0 +1,29 @@
+# Copy to .github/workflows/ in your repository, together with
+# benchmark-report.yml. This job runs the PR's code, so it gets a read-only
+# token; benchmark-report.yml posts the results.
+name: benchmarks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0  # needed for the merge-base and for building the base commit
+
+      # Install whatever your benchmarks need to build (compiler, CMake, libraries) here.
+
+      - uses: NinjanP2006/benchmark@v1
+        with:
+          mode: compare

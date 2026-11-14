@@ -19,9 +19,7 @@ concurrency:
 
 env:
   IMAGE: benchwatch-toolchain:ci
-  # Narrow this to a fast subset if PR runs get too slow; run the full suite nightly.
-  BENCH_FILTER: ""
-  ROUNDS: "15"
+  # Rounds, threshold, benchmark filter etc. come from .benchbot.yml.
 
 jobs:
   compare:
@@ -63,18 +61,25 @@ jobs:
           key: ccache-${{ hashFiles('docker/Dockerfile') }}-${{ github.event.pull_request.head.sha }}
           restore-keys: ccache-${{ hashFiles('docker/Dockerfile') }}-
 
+      - name: Use the base branch's config
+        # Not the PR's: otherwise a PR could loosen its own gate (e.g. raise
+        # the threshold) in .benchbot.yml. No config on base -> defaults.
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          git show "$BASE_SHA:.benchbot.yml" > out/config.yml 2>/dev/null || : > out/config.yml
+
       - name: Run comparison
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docker run --rm -v "$PWD:/work" \
-            -e CCACHE_DIR=/work/.ccache -e BASE_SHA -e HEAD_SHA -e BENCH_FILTER -e ROUNDS \
+            -e CCACHE_DIR=/work/.ccache -e BASE_SHA -e HEAD_SHA \
             "$IMAGE" sh -euc '
               uv sync --frozen --no-dev
-              uv run --no-sync bot compare \
-                --base "$BASE_SHA" --head "$HEAD_SHA" --rounds "$ROUNDS" \
-                ${BENCH_FILTER:+--filter "$BENCH_FILTER"} \
+              uv run --no-sync bot --config out/config.yml compare \
+                --base "$BASE_SHA" --head "$HEAD_SHA" \
                 --cmake-arg=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
                 --results-dir out/raw --out out/results.json --markdown out/comment.md \
                 --no-fail-on-regression

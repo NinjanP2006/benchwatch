@@ -22,7 +22,7 @@ env:
   IMAGE: benchwatch-toolchain:ci
   DATA_BRANCH: bench-data
   DB: history/benchwatch-history.db
-  ROUNDS: "15"
+  # Rounds, threshold etc. come from .benchbot.yml in the commit being recorded.
 
 jobs:
   record:
@@ -66,9 +66,9 @@ jobs:
         # worktrees, and from a different mount point the `history` worktree
         # would look missing and lose its metadata.
         run: |
-          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e CCACHE_DIR="$PWD/.ccache" -e ROUNDS -e DB "$IMAGE" sh -euc '
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e CCACHE_DIR="$PWD/.ccache" -e DB "$IMAGE" sh -euc '
             uv sync --frozen --no-dev
-            uv run --no-sync bot compare --base HEAD^1 --head HEAD --rounds "$ROUNDS" \
+            uv run --no-sync bot compare --base HEAD^1 --head HEAD \
               --cmake-arg=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               --results-dir out/raw --no-fail-on-regression
             uv run --no-sync bot record "$(ls -d out/raw/*/ | head -n 1)" --db "$DB"
