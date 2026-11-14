@@ -9,3 +9,5 @@ __pycache__/
 .ccache/
 out/
 validation/pools/*/round*.json
+/history/
+/benchwatch-history.db

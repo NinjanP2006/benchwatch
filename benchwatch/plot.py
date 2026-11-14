@@ -27,6 +27,55 @@ THEMES = {
 }
 
 
+def render_history(benchmark: str, df: pd.DataFrame, changepoints, out: Path, theme: str = "light") -> None:
+    """Median time per commit on main, the level of each segment between detected
+    changepoints, and a marker at each changepoint."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    from benchwatch.changepoint import segment_levels
+    from benchwatch.report import format_pct
+
+    t = THEMES[theme]
+    x = np.arange(len(df))
+    us = df["median_ns"].to_numpy() / 1e3
+    levels = segment_levels(us, changepoints)
+
+    fig, ax = plt.subplots(figsize=(10, 4), dpi=200)
+    fig.patch.set_facecolor(t["surface"])
+    _style_axes(ax, t)
+
+    ax.plot(x, levels, color=t["ink2"], linewidth=1.2, linestyle=(0, (4, 3)), drawstyle="steps-mid",
+            label="Segment median")
+    ax.plot(x, us, color=t["bar"], linewidth=1.5, marker="o", markersize=4.5,
+            markeredgecolor=t["surface"], markeredgewidth=1.0, label="Median time per commit")
+    top = float(max(us.max(), levels.max()))
+    for c in changepoints:
+        ax.axvline(c.index - 0.5, color=t["muted"], linewidth=1, linestyle=(0, (3, 3)))
+        ax.annotate(f"level shift {format_pct(1 + c.shift)}", xy=(c.index - 0.5, top), xytext=(4, 6),
+                    textcoords="offset points", fontsize=8.5, color=t["ink"], fontweight="bold")
+
+    step = max(1, len(df) // 12)
+    ax.set_xticks(x[::step])
+    ax.set_xticklabels([s[:7] for s in df["sha"].iloc[::step]], fontsize=8, rotation=0)
+    span = top - float(min(us.min(), levels.min()))
+    ax.set_ylim(float(min(us.min(), levels.min())) - span * 0.3, top + span * 0.35)
+    ax.set_ylabel("Median time (µs)", color=t["ink2"], fontsize=9.5)
+    ax.set_xlabel("Commit on main (oldest → newest)", color=t["ink2"], fontsize=9.5)
+    ax.set_title(f"{benchmark} over {len(df)} commits", loc="left", color=t["ink"], fontsize=11,
+                 fontweight="bold", pad=12)
+    legend = ax.legend(frameon=False, fontsize=8.5, loc="upper left")
+    for text in legend.get_texts():
+        text.set_color(t["ink2"])
+
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, facecolor=t["surface"])
+    plt.close(fig)
+
+
 def _style_axes(ax, t: dict) -> None:
     ax.set_facecolor(t["surface"])
     for side in ("top", "right", "left"):

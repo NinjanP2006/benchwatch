@@ -30,6 +30,7 @@ class Side:
     rev: str
     sha: str
     cmake_args: tuple[str, ...] = ()
+    committed_at: str = ""  # committer date, ISO 8601; orders the history
 
 
 @dataclass(frozen=True)
@@ -42,11 +43,23 @@ class RunConfig:
     cpu: str | None = None  # pin benchmark processes with `taskset -c` (Linux only)
 
 
+def cpu_model() -> str:
+    """Human-readable CPU name. Absolute timings are only comparable within one model."""
+    try:
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "unknown"
+
+
 def host_info() -> dict:
     return {
         "platform": platform.platform(),
         "machine": platform.machine(),
         "processor": platform.processor(),
+        "cpu_model": cpu_model(),
         "python": sys.version.split()[0],
     }
 
@@ -79,6 +92,10 @@ def repo_root(path: Path) -> Path:
 
 def resolve_sha(repo: Path, rev: str) -> str:
     return git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}")
+
+
+def commit_time(repo: Path, sha: str) -> str:
+    return git(repo, "show", "-s", "--format=%cI", sha)
 
 
 def merge_base(repo: Path, a: str, b: str) -> str:

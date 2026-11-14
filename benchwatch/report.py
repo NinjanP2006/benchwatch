@@ -225,6 +225,43 @@ def validation_markdown(summary, pool, headline: str, trials: int, alpha: float,
     return "\n".join(lines)
 
 
+# ---- History -------------------------------------------------------------------------
+
+def render_history(benchmark: str, df, changepoints, console: Console) -> None:
+    starts = {c.index: c for c in changepoints}
+    table = Table(title=f"{benchmark} on main", title_justify="left")
+    for col, justify in (("Committed", "left"), ("Commit", "left"), ("Time", "right"),
+                         ("vs parent", "right"), ("Verdict", "left"), ("", "left")):
+        table.add_column(col, justify=justify)
+    for i, row in enumerate(df.itertuples()):
+        verdict = Verdict(row.verdict)
+        mark = ""
+        if i in starts:
+            c = starts[i]
+            mark = f"[bold magenta]<- level shift {format_pct(1 + c.shift)}[/]"
+        table.add_row(row.committed_at[:10], row.sha[:7], format_time(row.median_ns),
+                      format_pct(row.ratio_vs_parent), f"[{_VERDICT_STYLE[verdict]}]{verdict.value}[/]", mark)
+    console.print(table)
+    if not changepoints:
+        console.print("no level shifts detected")
+    for c in changepoints:
+        console.print(f"level shift at {df['sha'].iloc[c.index][:7]}: {format_time(c.before_median)} -> "
+                      f"{format_time(c.after_median)} ({format_pct(1 + c.shift)}, p={format_p(c.p_value)})")
+
+
+def render_history_summary(series: dict, console: Console) -> None:
+    table = Table(title="Benchmarks on main", title_justify="left")
+    for col, justify in (("Benchmark", "left"), ("Commits", "right"), ("First", "right"),
+                         ("Latest", "right"), ("Level shifts", "left")):
+        table.add_column(col, justify=justify)
+    for name, (df, cps) in series.items():
+        shifts = ", ".join(f"[bold magenta]{format_pct(1 + c.shift)}[/] at {df['sha'].iloc[c.index][:7]}"
+                           for c in cps) or "[dim]none[/]"
+        table.add_row(name, str(len(df)), format_time(df["median_ns"].iloc[0]),
+                      format_time(df["median_ns"].iloc[-1]), shifts)
+    console.print(table)
+
+
 def to_dict(analysis: Analysis) -> dict:
     def clean(x):
         return None if isinstance(x, float) and not math.isfinite(x) else x

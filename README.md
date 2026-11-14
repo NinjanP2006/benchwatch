@@ -116,3 +116,40 @@ docker build -f docker/Dockerfile -t benchwatch-toolchain .
 docker run --rm -v "$PWD:/work" benchwatch-toolchain sh -c \
   'uv sync --frozen --no-dev && uv run --no-sync bot compare --base HEAD~1 --head HEAD --markdown out/comment.md'
 ```
+
+## History and trends
+
+Every push to `main` runs the **`history`** workflow ([bench-main.yml](.github/workflows/bench-main.yml)).
+It compares the new commit with its parent using the same interleaved, paired runs as a PR, then
+appends the result to a SQLite database on the `bench-data` branch. Each row has the commit's
+absolute median time, for trends, and its paired change against its parent.
+
+```sh
+git fetch origin bench-data && git show origin/bench-data:benchwatch-history.db > history.db
+uv run bot history --db history.db                     # every benchmark, with any level shifts
+uv run bot history BM_Sort/65536 --db history.db       # one benchmark, commit by commit
+uv sync --extra plot && uv run bot history BM_Sort/65536 --db history.db --plot trend.png
+```
+
+**Why look at history at all?** The PR check ignores changes below its threshold (3%), so five
+PRs that each add 1% are never flagged. `bot history` scans the series for **level shifts**: at
+each commit it compares the 10 commits before with the 10 after (Mann-Whitney U), Bonferroni-
+corrected for the positions scanned, and requires the median shift to exceed the threshold.
+Local windows see a regression and its later fix as two separate shifts. A whole-series
+binary segmentation, tried first, misses that case. The cost: a shift less than 10 commits from
+either end of the history can't be confirmed yet.
+
+Absolute times are only comparable on the same CPU. GitHub-hosted runners vary, so each run
+records the CPU model and `bot history` uses one model's series at a time (`--cpu-model`).
+
+`validation/history_demo.py` builds a reproducible demo: 24 commits where five consecutive ones
+each add a 1% slowdown, every one compared with its parent and recorded.
+
+In the recorded demo every per-commit check came back *unchanged* or *inconclusive*, while
+`bot history` found the creep in all three benchmarks: level shifts of +4.4% to +4.9%
+(5% planted), each placed inside the five slowing commits.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="validation/history-demo/history-dark.png">
+  <img alt="BM_Sort/65536 over 24 commits: flat around 3.42 ms, then a detected +4.6% level shift to about 3.58 ms in the middle of five commits that each added 1%" src="validation/history-demo/history-light.png">
+</picture>

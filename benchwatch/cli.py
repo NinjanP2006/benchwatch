@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
-from benchwatch import github, parse, report, runner, validate
+from benchwatch import changepoint, github, parse, report, runner, store, validate
 from benchwatch.stats import Params, analyze
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
@@ -101,8 +101,10 @@ def compare(
             base_sha = runner.resolve_sha(root, base)
 
         shared = tuple(cmake_arg or ())
-        base_side = runner.Side("base", base, base_sha, shared + tuple(base_cmake_arg or ()))
-        head_side = runner.Side("head", head, head_sha, shared + tuple(head_cmake_arg or ()))
+        base_side = runner.Side("base", base, base_sha, shared + tuple(base_cmake_arg or ()),
+                                runner.commit_time(root, base_sha))
+        head_side = runner.Side("head", head, head_sha, shared + tuple(head_cmake_arg or ()),
+                                runner.commit_time(root, head_sha))
         if base_side.sha == head_side.sha and base_side.cmake_args == head_side.cmake_args:
             console.print("[yellow]base and head are identical: this is an A/A comparison[/]")
 
@@ -211,6 +213,61 @@ def simulate_cmd(
             for theme in ("light", "dark"):
                 plotting.render(summary, headline_threshold, out_dir / f"validation-{theme}.png", theme)
         console.print(f"wrote {out_dir}")
+
+
+DbOpt = Annotated[Path, typer.Option("--db", help="SQLite history database.")]
+
+
+@app.command(name="record")
+def record_cmd(
+    run_dir: Annotated[Path, typer.Argument(help="A `bot compare` run of a commit against its parent.", exists=True, file_okay=False)],
+    db: DbOpt = Path("benchwatch-history.db"),
+    alpha: AlphaOpt = 0.01,
+    threshold: ThresholdOpt = 0.03,
+    warmup: WarmupOpt = 1,
+) -> None:
+    """Add a comparison run to the history database."""
+    rec = store.record(db, run_dir, Params(alpha=alpha, threshold=threshold, warmup=warmup))
+    console.print(f"{'replaced' if rec.replaced else 'recorded'} {rec.sha[:7]}: {rec.benchmarks} benchmarks in {db}")
+
+
+@app.command()
+def history(
+    benchmark: Annotated[Optional[str], typer.Argument(help="Benchmark to show. Omit for a summary of all.")] = None,
+    db: DbOpt = Path("benchwatch-history.db"),
+    cpu_model: Annotated[Optional[str], typer.Option(help="Series to use. Default: the CPU model with the most runs.")] = None,
+    threshold: ThresholdOpt = 0.03,
+    alpha: AlphaOpt = 0.01,
+    window: Annotated[int, typer.Option(help="Commits compared on each side of a candidate changepoint.")] = 10,
+    plot: Annotated[Optional[Path], typer.Option(help="Write a trend chart (PNG) for BENCHMARK; needs the 'plot' extra.")] = None,
+    theme: Annotated[str, typer.Option(help="Chart theme: light or dark.")] = "light",
+) -> None:
+    """Show benchmark trends on main and detect step changes across commits."""
+    if not db.exists():
+        raise typer.BadParameter(f"{db} does not exist; record runs with `bot record` first")
+    models = store.cpu_models(db)
+    df = store.load_history(db, benchmark, cpu_model)
+    if df.empty:
+        console.print("no history" + (f" for {benchmark}" if benchmark else ""))
+        raise typer.Exit(code=1)
+    model = df["cpu_model"].iloc[0]
+    others = [m for m, _ in models if m != model]
+    console.print(f"[dim]series: {model}" + (f"; also recorded on: {', '.join(others)}" if others else "") + "[/]")
+
+    def detect(series):
+        return changepoint.find_changepoints(series["median_ns"].to_numpy(), window=window,
+                                             alpha=alpha, threshold=threshold)
+
+    if benchmark is None:
+        report.render_history_summary({name: (g, detect(g)) for name, g in df.groupby("benchmark", sort=False)},
+                                      console)
+        return
+    cps = detect(df)
+    report.render_history(benchmark, df, cps, console)
+    if plot:
+        from benchwatch import plot as plotting
+        plotting.render_history(benchmark, df, cps, plot, theme)
+        console.print(f"wrote {plot}")
 
 
 RepoOpt = Annotated[Optional[str], typer.Option("--repo", help="owner/name. Default: $GITHUB_REPOSITORY.")]

@@ -1,0 +1,90 @@
+# Records benchmark history for every commit that lands on main.
+#
+# Each push is compared with its first parent using the same interleaved,
+# paired runs as a PR, and the result is appended to a SQLite database kept
+# on the `bench-data` branch (artifacts expire; a branch doesn't, and keeping
+# the data off main keeps main's history clean). `bot history` reads it.
+name: history
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # push the database to bench-data
+
+concurrency:
+  group: bench-history  # one writer at a time; queued runs are not cancelled
+  cancel-in-progress: false
+
+env:
+  IMAGE: benchwatch-toolchain:ci
+  DATA_BRANCH: bench-data
+  DB: history/benchwatch-history.db
+  ROUNDS: "15"
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the history branch
+        run: |
+          if git ls-remote --exit-code --heads origin "$DATA_BRANCH" > /dev/null; then
+            git fetch origin "$DATA_BRANCH"
+            git worktree add -B "$DATA_BRANCH" history "origin/$DATA_BRANCH"
+          else
+            git worktree add --orphan -b "$DATA_BRANCH" history
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ hashFiles('docker/Dockerfile') }}-${{ github.sha }}
+          restore-keys: ccache-${{ hashFiles('docker/Dockerfile') }}-
+
+      - name: Compare with parent and record
+        # Mounted at the same path as on the host: `bot compare` prunes git
+        # worktrees, and from a different mount point the `history` worktree
+        # would look missing and lose its metadata.
+        run: |
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" -e CCACHE_DIR="$PWD/.ccache" -e ROUNDS -e DB "$IMAGE" sh -euc '
+            uv sync --frozen --no-dev
+            uv run --no-sync bot compare --base HEAD^1 --head HEAD --rounds "$ROUNDS" \
+              --cmake-arg=-DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              --results-dir out/raw --no-fail-on-regression
+            uv run --no-sync bot record "$(ls -d out/raw/*/ | head -n 1)" --db "$DB"
+            uv run --no-sync bot history --db "$DB" > out/history.txt
+          '
+          { echo '```'; cat out/history.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the database
+        working-directory: history
+        run: |
+          git add benchwatch-history.db
+          if git diff --cached --quiet; then
+            echo "nothing to record"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Record benchmarks for ${GITHUB_SHA::7}"
+          git push origin "$DATA_BRANCH"
